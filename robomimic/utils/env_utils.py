@@ -302,4 +302,9 @@ def wrap_env_from_config(env, config):
         from robomimic.envs.wrappers import FrameStackWrapper
         env = FrameStackWrapper(env, num_frames=config.train.frame_stack)
 
+    guide = True # TODO add to config
+    if guide:
+        from robomimic.envs.wrappers import RedisWrapper
+        env = RedisWrapper(env)
+
     return env

@@ -220,3 +220,67 @@ class FrameStackWrapper(EnvWrapper):
     def _to_string(self):
         """Info to pretty print."""
         return "num_frames={}".format(self.num_frames)
+    
+
+
+
+
+
+from motor_cortex.common.guidance_wrapper import GuidanceWrapper, GuidanceArguments
+
+class RedisWrapper(EnvWrapper):
+    """
+    Wrapper for relaying observations during rollouts to a redis server. The agent
+    waits for the server to send back acknoledgement before acting in the environment.
+    """
+    def __init__(self, env, wait_ak):
+        """
+        Args:
+            env (EnvBase instance): The environment to wrap.
+            wait_ak (bool): whether to wait for acknoledgement from the server before acting
+        """
+        
+        super(FrameStackWrapper, self).__init__(env=env)
+
+        print("======================= initializing redis wrapper =======================")
+        self.wait_ak = wait_ak
+        guidance_args = GuidanceArguments().parse_args(known_only=True)
+        self.guidance_wrapper = GuidanceWrapper(guidance_args)
+        self.rollouts_per_demo = self.guidance_wrapper.rollouts_per_demo
+
+        if self.guidance_wrapper.pub_interval > 0:
+            self.action_mode.arm_action_mode.set_callable_each_step(
+                self.guidance_wrapper.get_obs_relay_func(self.get_obs_action))
+
+
+    def update_obs(self, obs, action=None, reset=False):
+        """overwriting the update_obs method to relay the observations to the redis server"""
+
+        meta = self.guidance_wrapper.get_obs_meta(obs)
+        
+        print(obs)
+        print("OBSERVATION KEYS")
+        print(obs.keys())
+        # rgb = obs["camera_rgb"]
+        cam = "front"
+        depth = getattr(obs, "{}_depth".format(cam))
+        pc = getattr(obs, "{}_point_cloud".format(cam))
+        rgb = getattr(obs, "{}_rgb".format(cam))
+        self.guidance_wrapper.transmit(rgb,f"{cam}_rgb", meta=meta)
+        self.guidance_wrapper.transmit(depth,f"{cam}_depth", meta=meta)
+        self.guidance_wrapper.transmit(pc,f"{cam}_point_cloud", meta=meta)
+
+        # meta["robot_state"] = list(obs.gripper_pose)
+        # meta.update(extra_meta)
+
+        obs["timesteps"] = np.array([self.timestep])
+        
+        if reset:
+            obs["actions"] = np.zeros(self.env.action_dimension)
+        else:
+            self.timestep += 1
+            obs["actions"] = action[: self.env.action_dimension]
+
+    def _to_string(self):
+        """Info to pretty print."""
+        return "num_frames={}".format(self.num_frames)
