@@ -20,18 +20,14 @@ import json
 import numpy as np
 import time
 import os
-import shutil
 import psutil
 import sys
-import socket
 import traceback
 
-from collections import OrderedDict
 
 import torch
 from torch.utils.data import DataLoader
 
-import robomimic
 import robomimic.utils.train_utils as TrainUtils
 import robomimic.utils.torch_utils as TorchUtils
 import robomimic.utils.obs_utils as ObsUtils

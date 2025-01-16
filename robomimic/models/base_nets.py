@@ -12,10 +12,12 @@ from collections import OrderedDict
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torchvision import models as vision_models
 from torchvision import transforms
+from torchvision import models as vision_models
 
 import robomimic.utils.tensor_utils as TensorUtils
+import robomimic.utils.obs_utils as ObsUtils
+
 
 CONV_ACTIVATIONS = {
     "relu": nn.ReLU,
@@ -90,11 +92,20 @@ class Sequential(torch.nn.Sequential, Module):
     """
     Compose multiple Modules together (defined above).
     """
-    def __init__(self, *args):
+    def __init__(self, *args, has_output_shape = True):
+        """
+        Args:
+            has_output_shape (bool, optional): indicates whether output_shape can be called on the Sequential module.
+                torch.nn modules do not have an output_shape, but Modules (defined above) do. Defaults to True.
+        """
         for arg in args:
-            assert isinstance(arg, Module)
+            if has_output_shape:
+                assert isinstance(arg, Module)
+            else:
+                assert isinstance(arg, nn.Module)
         torch.nn.Sequential.__init__(self, *args)
         self.fixed = False
+        self.has_output_shape = has_output_shape
 
     def output_shape(self, input_shape=None):
         """
@@ -108,6 +119,8 @@ class Sequential(torch.nn.Sequential, Module):
         Returns:
             out_shape ([int]): list of integers corresponding to output shape
         """
+        if not self.has_output_shape:
+            raise NotImplementedError("Output shape is not defined for this module")
         out_shape = input_shape
         for module in self:
             out_shape = module.output_shape(out_shape)
@@ -453,6 +466,20 @@ class ConvBase(Module):
     """
     def __init__(self):
         super(ConvBase, self).__init__()
+
+    def __init_subclass__(cls, **kwargs):
+        """
+        Hook method to automatically register all valid subclasses so we can keep track of valid observation encoders
+        in a global dict.
+
+        This global dict stores mapping from observation encoder network name to class.
+        We keep track of these registries to enable automated class inference at runtime, allowing
+        users to simply extend our base encoder class and refer to that class in string form
+        in their config, without having to manually register their class internally.
+        This also future-proofs us for any additional encoder classes we would
+        like to add ourselves.
+        """
+        ObsUtils.register_encoder_backbone(cls)
 
     # dirty hack - re-implement to pass the buck onto subclasses from ABC parent
     def output_shape(self, input_shape):
@@ -1126,6 +1153,166 @@ class MVPConv(ConvBase):
         return header + '(input_channel={}, input_coord_conv={}, pretrained={}, freeze={})'.format(self._input_channel, self._input_coord_conv, self._pretrained, self._freeze)
 
 
+class R3MConv(ConvBase):
+    """
+    Base class for ConvNets pretrained with R3M (https://arxiv.org/abs/2203.12601)
+    """
+    def __init__(
+        self,
+        input_channel=3,
+        r3m_model_class='resnet18',
+        freeze=True,
+    ):
+        """
+        Using R3M pretrained observation encoder network proposed by https://arxiv.org/abs/2203.12601
+        Args:
+            input_channel (int): number of input channels for input images to the network.
+                If not equal to 3, modifies first conv layer in ResNet to handle the number
+                of input channels.
+            r3m_model_class (str): select one of the r3m pretrained model "resnet18", "resnet34" or "resnet50"
+            freeze (bool): if True, use a frozen R3M pretrained model.
+        """
+        super(R3MConv, self).__init__()
+
+        try:
+            from r3m import load_r3m
+        except ImportError:
+            print("WARNING: could not load r3m library! Please follow https://github.com/facebookresearch/r3m to install R3M")
+
+        net = load_r3m(r3m_model_class)
+
+        assert input_channel == 3 # R3M only support input image with channel size 3
+        assert r3m_model_class in ["resnet18", "resnet34", "resnet50"] # make sure the selected r3m model do exist
+
+        # cut the last fc layer
+        self._input_channel = input_channel
+        self._r3m_model_class = r3m_model_class
+        self._freeze = freeze
+        self._input_coord_conv = False
+        self._pretrained = True
+
+        preprocess = nn.Sequential(
+            transforms.Resize(256),
+            transforms.CenterCrop(224),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+        )
+        self.nets = Sequential(*([preprocess] + list(net.module.convnet.children())), has_output_shape = False)
+        if freeze:
+            self.nets.freeze()
+
+        self.weight_sum = np.sum([param.cpu().data.numpy().sum() for param in self.nets.parameters()])
+        if freeze:
+            for param in self.nets.parameters():
+                param.requires_grad = False
+
+        self.nets.eval()
+
+    def output_shape(self, input_shape):
+        """
+        Function to compute output shape from inputs to this module.
+        Args:
+            input_shape (iterable of int): shape of input. Does not include batch dimension.
+                Some modules may not need this argument, if their output does not depend
+                on the size of the input, or if they assume fixed size input.
+        Returns:
+            out_shape ([int]): list of integers corresponding to output shape
+        """
+        assert(len(input_shape) == 3)
+
+        if self._r3m_model_class == 'resnet50':
+            out_dim = 2048
+        else:
+            out_dim = 512
+
+        return [out_dim, 1, 1]
+
+    def __repr__(self):
+        """Pretty print network."""
+        header = '{}'.format(str(self.__class__.__name__))
+        return header + '(input_channel={}, input_coord_conv={}, pretrained={}, freeze={})'.format(self._input_channel, self._input_coord_conv, self._pretrained, self._freeze)
+
+
+class MVPConv(ConvBase):
+    """
+    Base class for ConvNets pretrained with MVP (https://arxiv.org/abs/2203.06173)
+    """
+    def __init__(
+        self,
+        input_channel=3,
+        mvp_model_class='vitb-mae-egosoup',
+        freeze=True,
+    ):
+        """
+        Using MVP pretrained observation encoder network proposed by https://arxiv.org/abs/2203.06173
+        Args:
+            input_channel (int): number of input channels for input images to the network.
+                If not equal to 3, modifies first conv layer in ResNet to handle the number
+                of input channels.
+            mvp_model_class (str): select one of the mvp pretrained model "vits-mae-hoi", "vits-mae-in", "vits-sup-in", "vitb-mae-egosoup" or "vitl-256-mae-egosoup"
+            freeze (bool): if True, use a frozen MVP pretrained model.
+        """
+        super(MVPConv, self).__init__()
+
+        try:
+            import mvp
+        except ImportError:
+            print("WARNING: could not load mvp library! Please follow https://github.com/ir413/mvp to install MVP.")
+
+        self.nets = mvp.load(mvp_model_class)
+        if freeze:
+            self.nets.freeze()
+
+        assert input_channel == 3 # MVP only support input image with channel size 3
+        assert mvp_model_class in ["vits-mae-hoi", "vits-mae-in", "vits-sup-in", "vitb-mae-egosoup", "vitl-256-mae-egosoup"] # make sure the selected r3m model do exist
+
+        self._input_channel = input_channel
+        self._freeze = freeze
+        self._mvp_model_class = mvp_model_class
+        self._input_coord_conv = False
+        self._pretrained = True
+
+        if '256' in mvp_model_class:
+            input_img_size = 256
+        else:
+            input_img_size = 224
+        self.preprocess = nn.Sequential(
+            transforms.Resize(input_img_size)
+        )
+
+    def forward(self, inputs):
+        x = self.preprocess(inputs)
+        x = self.nets(x)
+        if list(self.output_shape(list(inputs.shape)[1:])) != list(x.shape)[1:]:
+            raise ValueError('Size mismatch: expect size %s, but got size %s' % (
+                str(self.output_shape(list(inputs.shape)[1:])), str(list(x.shape)[1:]))
+            )
+        return x
+
+    def output_shape(self, input_shape):
+        """
+        Function to compute output shape from inputs to this module.
+        Args:
+            input_shape (iterable of int): shape of input. Does not include batch dimension.
+                Some modules may not need this argument, if their output does not depend
+                on the size of the input, or if they assume fixed size input.
+        Returns:
+            out_shape ([int]): list of integers corresponding to output shape
+        """
+        assert(len(input_shape) == 3)
+        if 'vitb' in self._mvp_model_class:
+            output_shape = [768]
+        elif 'vitl' in self._mvp_model_class:
+            output_shape = [1024]
+        else:
+            output_shape = [384]
+        return output_shape
+
+    def __repr__(self):
+        """Pretty print network."""
+        header = '{}'.format(str(self.__class__.__name__))
+        return header + '(input_channel={}, input_coord_conv={}, pretrained={}, freeze={})'.format(self._input_channel, self._input_coord_conv, self._pretrained, self._freeze)
+
+
 class CoordConv2d(nn.Conv2d, Module):
     """
     2D Coordinate Convolution
@@ -1275,6 +1462,11 @@ class Conv1dBase(Module):
 
         # Get activation requested
         activation = CONV_ACTIVATIONS[activation]
+        
+        # Add layer kwargs
+        conv_kwargs["out_channels"] = out_channels
+        conv_kwargs["kernel_size"] = kernel_size
+        conv_kwargs["stride"] = stride
 
         # Generate network
         self.n_layers = len(out_channels)

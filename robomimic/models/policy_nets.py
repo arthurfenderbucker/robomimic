@@ -6,7 +6,6 @@ samples, or distributions as outputs. Note that actions
 are assumed to lie in [-1, 1], and most networks will have a final
 tanh activation to help ensure this range.
 """
-import textwrap
 import numpy as np
 from collections import OrderedDict
 
@@ -17,8 +16,7 @@ import torch.distributions as D
 
 import robomimic.utils.tensor_utils as TensorUtils
 from robomimic.models.base_nets import Module
-from robomimic.models.transformers import GPT_Backbone
-from robomimic.models.obs_nets import MIMO_MLP, RNN_MIMO_MLP, MIMO_Transformer, ObservationDecoder
+from robomimic.models.obs_nets import MIMO_MLP, RNN_MIMO_MLP, MIMO_Transformer
 from robomimic.models.vae_nets import VAE
 from robomimic.models.distributions import TanhWrappedDistribution
 

@@ -5,15 +5,12 @@ for more details.
 """
 
 import math
-import numpy as np
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 from robomimic.models.base_nets import Module
-import robomimic.utils.tensor_utils as TensorUtils
-import robomimic.utils.torch_utils as TorchUtils
 
 class GEGLU(nn.Module):
     """

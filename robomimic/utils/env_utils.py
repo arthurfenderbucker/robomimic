@@ -144,6 +144,7 @@ def create_env(
     render_offscreen=False, 
     use_image_obs=False, 
     env_lang=None,
+    use_depth_obs=False, 
     **kwargs,
 ):
     """
@@ -165,6 +166,10 @@ def create_env(
             observations are not required.
 
         env_lang: TODO documentation
+        
+        use_depth_obs (bool): if True, environment is expected to render depth image observations
+            on every env.step call. Set this to False for efficiency reasons, if depth
+            observations are not required.
     """
 
     # note: pass @postprocess_visual_obs True, to make sure images are processed for network inputs
@@ -174,6 +179,7 @@ def create_env(
         render=render, 
         render_offscreen=render_offscreen, 
         use_image_obs=use_image_obs,
+        use_depth_obs=use_depth_obs,
         postprocess_visual_obs=True,
         env_lang=env_lang,
         **kwargs,
@@ -190,6 +196,7 @@ def create_env_from_metadata(
     render_offscreen=False, 
     use_image_obs=False,
     seed=None,
+    use_depth_obs=False, 
 ):
     """
     Create environment.
@@ -214,6 +221,10 @@ def create_env_from_metadata(
         use_image_obs (bool): if True, environment is expected to render rgb image observations
             on every env.step call. Set this to False for efficiency reasons, if image
             observations are not required.
+
+        use_depth_obs (bool): if True, environment is expected to render depth image observations
+            on every env.step call. Set this to False for efficiency reasons, if depth
+            observations are not required.
     """
     if env_name is None:
         env_name = env_meta["env_name"]
@@ -231,6 +242,7 @@ def create_env_from_metadata(
         render_offscreen=render_offscreen, 
         use_image_obs=use_image_obs,
         env_lang=env_lang,
+        use_depth_obs=use_depth_obs, 
         **env_kwargs,
     )
     check_env_version(env, env_meta)
@@ -244,6 +256,11 @@ def create_env_for_data_processing(
     camera_width, 
     reward_shaping,
     seed=None,
+    env_class=None,
+    render=None, 
+    render_offscreen=None, 
+    use_image_obs=None, 
+    use_depth_obs=None, 
 ):
     """
     Creates environment for processing dataset observations and rewards.
@@ -264,11 +281,20 @@ def create_env_for_data_processing(
         camera_width (int): camera width for all cameras
 
         reward_shaping (bool): if True, use shaped environment rewards, else use sparse task completion rewards
+
+        render (bool or None): optionally override rendering behavior
+
+        render_offscreen (bool or None): optionally override rendering behavior
+
+        use_image_obs (bool or None): optionally override rendering behavior
+
+        use_depth_obs (bool or None): optionally override rendering behavior
     """
     env_name = env_meta["env_name"]
     env_type = get_env_type(env_meta=env_meta)
     env_kwargs = env_meta["env_kwargs"]
-    env_class = get_env_class(env_type=env_type)
+    if env_class is None:
+        env_class = get_env_class(env_type=env_type)
 
     # remove possibly redundant values in kwargs
     env_kwargs = deepcopy(env_kwargs)
@@ -277,6 +303,10 @@ def create_env_for_data_processing(
     env_kwargs.pop("camera_height", None)
     env_kwargs.pop("camera_width", None)
     env_kwargs.pop("reward_shaping", None)
+    env_kwargs.pop("render", None)
+    env_kwargs.pop("render_offscreen", None)
+    env_kwargs.pop("use_image_obs", None)
+    env_kwargs.pop("use_depth_obs", None)
 
     if seed is not None:
         env_kwargs["seed"] = seed
@@ -287,10 +317,30 @@ def create_env_for_data_processing(
         camera_height=camera_height, 
         camera_width=camera_width, 
         reward_shaping=reward_shaping, 
+        render=render, 
+        render_offscreen=render_offscreen, 
+        use_image_obs=use_image_obs, 
+        use_depth_obs=use_depth_obs,
         **env_kwargs,
     )
     check_env_version(env, env_meta)
     return env
+
+
+def set_env_specific_obs_processing(env_meta=None, env_type=None, env=None):
+    """
+    Sets env-specific observation processing. As an example, robosuite depth observations
+    correspond to raw depth and should not be normalized by default, while default depth
+    processing normalizes and clips all values to [0, 1].
+    """
+    if is_robosuite_env(env_meta=env_meta, env_type=env_type, env=env):
+        from robomimic.utils.obs_utils import DepthModality, process_frame, unprocess_frame
+        DepthModality.set_obs_processor(processor=(
+            lambda obs: process_frame(frame=obs, channel_dim=1, scale=None)
+        ))
+        DepthModality.set_obs_unprocessor(unprocessor=(
+            lambda obs: unprocess_frame(frame=obs, channel_dim=1, scale=None)
+        ))
 
 
 def wrap_env_from_config(env, config):
@@ -298,7 +348,7 @@ def wrap_env_from_config(env, config):
     Wraps environment using the provided Config object to determine which wrappers
     to use (if any).
     """
-    if config.train.frame_stack > 1:
+    if ("frame_stack" in config.train) and (config.train.frame_stack > 1):
         from robomimic.envs.wrappers import FrameStackWrapper
         env = FrameStackWrapper(env, num_frames=config.train.frame_stack)
 

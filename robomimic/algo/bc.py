@@ -5,18 +5,15 @@ from collections import OrderedDict
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 import torch.distributions as D
 
 import robomimic.models.base_nets as BaseNets
-import robomimic.models.obs_nets as ObsNets
 import robomimic.models.policy_nets as PolicyNets
 import robomimic.models.vae_nets as VAENets
 import robomimic.utils.loss_utils as LossUtils
 import robomimic.utils.tensor_utils as TensorUtils
 import robomimic.utils.torch_utils as TorchUtils
 import robomimic.utils.obs_utils as ObsUtils
-from robomimic.macros import LANG_EMB_KEY
 
 from robomimic.algo import register_algo_factory_func, PolicyAlgo
 
@@ -41,7 +38,8 @@ def algo_config_to_class(algo_config):
     vae_enabled = ("vae" in algo_config and algo_config.vae.enabled)
 
     rnn_enabled = algo_config.rnn.enabled
-    transformer_enabled = algo_config.transformer.enabled
+    # support legacy configs that do not have "transformer" item
+    transformer_enabled = ("transformer" in algo_config) and algo_config.transformer.enabled
 
     if gaussian_enabled:
         if rnn_enabled:
@@ -707,7 +705,7 @@ class BC_Transformer(BC):
         """
         self.context_length = self.algo_config.transformer.context_length
         self.supervise_all_steps = self.algo_config.transformer.supervise_all_steps
-        self.pred_future_acs = self.algo_config.transformer.pred_future_acs
+        self.pred_future_acs = ("transformer" in self.algo_config) and self.algo_config.transformer.pred_future_acs
         if self.pred_future_acs:
             assert self.supervise_all_steps is True
 
