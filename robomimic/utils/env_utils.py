@@ -305,6 +305,6 @@ def wrap_env_from_config(env, config):
     guide = True # TODO add to config
     if guide:
         from robomimic.envs.wrappers import RedisWrapper
-        env = RedisWrapper(env)
+        env = RedisWrapper(env, wait_ak=True)
 
     return env

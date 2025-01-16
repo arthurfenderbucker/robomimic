@@ -5,7 +5,6 @@ and to tensorboard.
 import os
 import sys
 import numpy as np
-from datetime import datetime
 from contextlib import contextmanager
 import textwrap
 import time
@@ -37,7 +36,8 @@ class PrintLogger(object):
         # this handles the flush command by doing nothing.
         # you might want to specify some extra behavior here.
         pass
-
+    def isatty(self):
+        return False
 
 class DataLogger(object):
     """

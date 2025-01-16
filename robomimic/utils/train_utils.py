@@ -8,7 +8,6 @@ import time
 import datetime
 import shutil
 import json
-import h5py
 import imageio
 import numpy as np
 import traceback
@@ -568,7 +567,7 @@ def rollout_with_stats(
                     video_skip=video_skip,
                     terminate_on_success=terminate_on_success,
                 )
-            except Exception as e:
+            except Exception:
                 print("Rollout exception at episode number {}!".format(ep_i))
                 print(traceback.format_exc())
                 break
@@ -606,7 +605,10 @@ def rollout_with_stats(
 
         if del_envs_after_rollouts:
             # delete the environment after use
-            env.env.env.close()
+            if hasattr(env, "close"):
+                env.close()
+            else:
+                env.env.env.close()
             del env
 
         if data_logger is not None:

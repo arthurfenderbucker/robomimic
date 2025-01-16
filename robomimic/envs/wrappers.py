@@ -227,20 +227,20 @@ class FrameStackWrapper(EnvWrapper):
 
 
 from motor_cortex.common.guidance_wrapper import GuidanceWrapper, GuidanceArguments
-
+import robosuite.utils.camera_utils as CU
 class RedisWrapper(EnvWrapper):
     """
     Wrapper for relaying observations during rollouts to a redis server. The agent
     waits for the server to send back acknoledgement before acting in the environment.
     """
-    def __init__(self, env, wait_ak):
+    def __init__(self, env, wait_ak = False):
         """
         Args:
             env (EnvBase instance): The environment to wrap.
             wait_ak (bool): whether to wait for acknoledgement from the server before acting
         """
         
-        super(FrameStackWrapper, self).__init__(env=env)
+        super(RedisWrapper, self).__init__(env=env)
 
         print("======================= initializing redis wrapper =======================")
         self.wait_ak = wait_ak
@@ -248,26 +248,81 @@ class RedisWrapper(EnvWrapper):
         self.guidance_wrapper = GuidanceWrapper(guidance_args)
         self.rollouts_per_demo = self.guidance_wrapper.rollouts_per_demo
 
-        if self.guidance_wrapper.pub_interval > 0:
-            self.action_mode.arm_action_mode.set_callable_each_step(
-                self.guidance_wrapper.get_obs_relay_func(self.get_obs_action))
+
+        self.main_camera_name = "robot0_agentview_right"
+        # if self.guidance_wrapper.pub_interval > 0:
+            # self.action_mode.arm_action_mode.set_callable_each_step(
+            #     self.guidance_wrapper.get_obs_relay_func(self.get_obs_action))
 
 
-    def update_obs(self, obs, action=None, reset=False):
+    def _visualize_pc(self, pc):
+        """
+        Helper function to visualize the point cloud.
+        """
+        import open3d as o3d
+        pcd = o3d.geometry.PointCloud()
+        pcd.points = o3d.utility.Vector3dVector(pc)
+        o3d.visualization.draw_geometries([pcd])
+
+
+    def _get_point_cloud(self, obs, depth_map):
+        """
+        Helper function to compute the point cloud from the observation.
+        """
+        # get camera matrices
+        world_to_camera = CU.get_camera_transform_matrix(
+            sim=self.env.sim,
+            camera_name=f"{self.main_camera_name}_depth",
+            camera_height=self.camera_height,
+            camera_width=self.camera_width,
+        )
+        camera_to_world = np.linalg.inv(world_to_camera)
+
+        
+
+        pixel_coord = depth_map.reshape(-1, 3)
+        pixel_coord = np.hstack([pixel_coord, np.ones((pixel_coord.shape[0], 1))])
+
+        pc = camera_to_world @ pixel_coord.T
+        pc = pc.T[:, :3]
+        return pc
+    
+
+    def reset(self):
+        obs = self.env.reset()
+        self.relay_obs(obs)
+        return obs
+
+    def reset_to(self, state):
+        obs = self.env.reset_to(state)
+        self.relay_obs(obs)
+        return obs
+
+    def step(self, action):
+        
+        obs_ret, r, done, info = self.env.step(action)
+        self.relay_obs(obs_ret)
+        return obs_ret, r, done, info
+
+    def relay_obs(self, obs, action=None, reset=False):
         """overwriting the update_obs method to relay the observations to the redis server"""
 
         meta = self.guidance_wrapper.get_obs_meta(obs)
+
+        # unnormalized depth map
+        depth_map = obs["{}_depth".format(self.main_camera_name)][::-1]
+        depth_map = CU.get_real_depth_map(sim=self.env.sim, depth_map=depth_map)
+
+        pc = self._get_point_cloud(obs, depth_map)
         
         print(obs)
         print("OBSERVATION KEYS")
         print(obs.keys())
         # rgb = obs["camera_rgb"]
         cam = "front"
-        depth = getattr(obs, "{}_depth".format(cam))
-        pc = getattr(obs, "{}_point_cloud".format(cam))
         rgb = getattr(obs, "{}_rgb".format(cam))
         self.guidance_wrapper.transmit(rgb,f"{cam}_rgb", meta=meta)
-        self.guidance_wrapper.transmit(depth,f"{cam}_depth", meta=meta)
+        self.guidance_wrapper.transmit(depth_map,f"{cam}_depth", meta=meta)
         self.guidance_wrapper.transmit(pc,f"{cam}_point_cloud", meta=meta)
 
         # meta["robot_state"] = list(obs.gripper_pose)
@@ -281,6 +336,13 @@ class RedisWrapper(EnvWrapper):
             self.timestep += 1
             obs["actions"] = action[: self.env.action_dimension]
 
-    def _to_string(self):
-        """Info to pretty print."""
-        return "num_frames={}".format(self.num_frames)
+    def close(self):
+        env = self.env
+        while True:
+            if isinstance(env, EnvWrapper) and hasattr(env, "env"):
+                env = env.env
+                if hasattr(env, "close"):
+                    env.close()
+                    break
+            else:
+                break
