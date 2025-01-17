@@ -34,6 +34,27 @@ def make_generator_helper(args):
             (get_robocasa_ds("OpenSingleDoor", filter_key="10_demos"), "OpenSingleDoor"),
         ]
     )
+
+    generator.add_param(
+        key="observation.modalities.obs.rgb",
+        name="",
+        group=-1,
+        values=[
+            ["robot0_agentview_left_image",
+                "robot0_agentview_right_image",
+                "robot0_eye_in_hand_image"]
+        ],
+    )
+    generator.add_param(
+        key="observation.modalities.obs.depth",
+        name="",
+        group=-1,
+        values=[
+            ["robot0_agentview_left_depth",
+                "robot0_agentview_right_depth",
+                "robot0_eye_in_hand_depth"]
+        ],
+    )
     
     generator.add_param(
         key="train.output_dir",

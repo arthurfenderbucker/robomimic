@@ -10,6 +10,8 @@ from copy import deepcopy
 import robosuite
 try:
     import robocasa
+except ImportError:
+    pass
 import robosuite.utils.transform_utils as T
 try:
     # this is needed for ensuring robosuite can find the additional mimicgen environments (see https://mimicgen.github.io)
@@ -23,9 +25,7 @@ except ImportError:
     pass
 
 import robomimic.utils.obs_utils as ObsUtils
-import robomimic.utils.lang_utils as LangUtils
 import robomimic.envs.env_base as EB
-from robomimic.macros import LANG_EMB_KEY
 
 # protect against missing mujoco-py module, since robosuite might be using mujoco-py or DM backend
 try:
@@ -114,7 +114,6 @@ class EnvRobosuite(EB.EnvBase):
         self._env_name = env_name
         self._init_kwargs = deepcopy(kwargs)
         self.env = robosuite.make(self._env_name, **kwargs)
-        self.base_env = self.env # for mimicgen
         self.env_lang = env_lang
 
         if self._is_v1:
@@ -581,7 +580,7 @@ class EnvRobosuite(EB.EnvBase):
         Grabs base simulation environment.
         """
         return self.env
-
+        
     def __repr__(self):
         """
         Pretty-print env description.

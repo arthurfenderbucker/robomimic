@@ -225,7 +225,8 @@ class FrameStackWrapper(EnvWrapper):
 
 
 from motor_cortex.common.guidance_wrapper import GuidanceWrapper, GuidanceArguments
-import robosuite.utils.camera_utils as CU
+import matplotlib.pyplot as plt
+
 class RedisWrapper(EnvWrapper):
     """
     Wrapper for relaying observations during rollouts to a redis server. The agent
@@ -246,48 +247,147 @@ class RedisWrapper(EnvWrapper):
         self.guidance_wrapper = GuidanceWrapper(guidance_args)
         self.rollouts_per_demo = self.guidance_wrapper.rollouts_per_demo
 
-
         self.main_camera_name = "robot0_agentview_right"
+        self.main_camera_index = 0
         # if self.guidance_wrapper.pub_interval > 0:
             # self.action_mode.arm_action_mode.set_callable_each_step(
             #     self.guidance_wrapper.get_obs_relay_func(self.get_obs_action))
 
+    def _visualize_pc(self, pc, rgb_image, depth_map):
+        """
+        Helper function to visualize the point cloud with colors.
+        """
+        colors = rgb_image.reshape(-1, 3)
+        if not hasattr(self, 'fig'):
+            self.fig = plt.figure(figsize=(15, 5))
+            self.ax = self.fig.add_subplot(131, projection='3d')
+            self.scatter = self.ax.scatter(pc[:, 0], pc[:, 1], pc[:, 2], c=colors)
+            self.ax.set_xlabel('X')
+            self.ax.set_ylabel('Y')
+            self.ax.set_zlabel('Z')
+            self.ax.set_box_aspect([1, 1, 1])  # Set the aspect ratio to be equal
 
-    def _visualize_pc(self, pc):
-        """
-        Helper function to visualize the point cloud.
-        """
-        import open3d as o3d
-        pcd = o3d.geometry.PointCloud()
-        pcd.points = o3d.utility.Vector3dVector(pc)
-        o3d.visualization.draw_geometries([pcd])
+            # Initialize quivers for frame of reference
+            self.quiver_x = self.ax.quiver(0, 0, 0, 1, 0, 0, color='r', label='X')
+            self.quiver_y = self.ax.quiver(0, 0, 0, 0, 1, 0, color='g', label='Y')
+            self.quiver_z = self.ax.quiver(0, 0, 0, 0, 0, 1, color='b', label='Z')
+            self.ax.legend()
+
+            self.azim = 0
+            # Set initial view
+            self.ax.view_init(elev=0, azim=self.azim)
+
+            # Add RGB image subplot
+            self.ax_rgb = self.fig.add_subplot(132)
+            self.rgb_image_plot = self.ax_rgb.imshow(rgb_image)
+            self.ax_rgb.set_title('RGB Image')
+            self.ax_rgb.axis('off')
+
+            # Add Depth image subplot
+            self.ax_depth = self.fig.add_subplot(133)
+            self.depth_image_plot = self.ax_depth.imshow(depth_map, cmap='gray')
+            self.ax_depth.set_title('Depth Image')
+            self.ax_depth.axis('off')
+
+            plt.ion()
+            plt.show()
+        else:
+            self.scatter._offsets3d = (pc[:, 0], pc[:, 1], pc[:, 2])
+            self.scatter.set_color(colors)
+            self.ax.set_xlim([pc[:, 0].min(), pc[:, 0].max()])
+            self.ax.set_ylim([pc[:, 1].min(), pc[:, 1].max()])
+            self.ax.set_zlim([pc[:, 2].min(), pc[:, 2].max()])
+            self.ax.set_box_aspect([1, 1, 1])  # Set the aspect ratio to be equal
+
+            # Update quivers for frame of reference
+            max_range = np.array([pc[:, 0].max() - pc[:, 0].min(), pc[:, 1].max() - pc[:, 1].min(), pc[:, 2].max() - pc[:, 2].min()]).max() / 2.0
+            mid_x = (pc[:, 0].max() + pc[:, 0].min()) * 0.5
+            mid_y = (pc[:, 1].max() + pc[:, 1].min()) * 0.5
+            mid_z = (pc[:, 2].max() + pc[:, 2].min()) * 0.5
+            self.quiver_x.remove()
+            self.quiver_y.remove()
+            self.quiver_z.remove()
+            self.quiver_x = self.ax.quiver(mid_x, mid_y, mid_z, max_range, 0, 0, color='r', label='X')
+            self.quiver_y = self.ax.quiver(mid_x, mid_y, mid_z, 0, max_range, 0, color='g', label='Y')
+            self.quiver_z = self.ax.quiver(mid_x, mid_y, mid_z, 0, 0, max_range, color='b', label='Z')
+
+            self.azim -= 2
+            self.ax.view_init(elev=0, azim=self.azim)
+
+            # Update RGB image
+            self.rgb_image_plot.set_data(rgb_image)
+
+            # Update Depth image
+            self.depth_image_plot.set_data(depth_map)
+
+            plt.draw()
+            plt.pause(0.001)
+
 
 
     def _get_point_cloud(self, obs, depth_map):
         """
         Helper function to compute the point cloud from the observation.
         """
-        # get camera matrices
-        world_to_camera = CU.get_camera_transform_matrix(
-            sim=self.env.sim,
-            camera_name=f"{self.main_camera_name}_depth",
-            camera_height=self.camera_height,
-            camera_width=self.camera_width,
-        )
-        camera_to_world = np.linalg.inv(world_to_camera)
-
+        height=self.base_env.camera_heights[self.main_camera_index]
+        width=self.base_env.camera_widths[self.main_camera_index]
         
+        
+        # get camera matrices
+        intrinsic_matrix = self.get_camera_intrinsic_matrix(
+            camera_name=f"{self.main_camera_name}",
+            camera_height=height,
+            camera_width=width
+        )
+        extrinsic_matrix = self.get_camera_extrinsic_matrix(
+            camera_name=f"{self.main_camera_name}",
+        )
+        u, v = np.meshgrid(np.arange(width), np.arange(height))
 
-        pixel_coord = depth_map.reshape(-1, 3)
-        pixel_coord = np.hstack([pixel_coord, np.ones((pixel_coord.shape[0], 1))])
+        # Flatten and stack pixel coordinates
+        u_flat = u.flatten()
+        v_flat = v.flatten()
+        z_flat = depth_map.flatten()
 
-        pc = camera_to_world @ pixel_coord.T
-        pc = pc.T[:, :3]
-        return pc
-    
+        # Discard points with zero or invalid depth
+        valid = z_flat > 0
+        u_flat = u_flat[valid]
+        v_flat = v_flat[valid]
+        z_flat = z_flat[valid]
+
+        # Intrinsic matrix inverse
+        intrinsic_inv = np.linalg.inv(intrinsic_matrix)
+
+        # Convert (u, v, 1) to camera coordinates
+        pixel_coords = np.stack([u_flat, v_flat, np.ones_like(u_flat)], axis=1)
+        camera_coords = (pixel_coords * z_flat[:, None]) @ intrinsic_inv.T
+
+        # Add homogeneous coordinate for transformation
+        camera_coords_hom = np.hstack([camera_coords, np.ones((camera_coords.shape[0], 1))])
+
+        # Transform to world coordinates using the extrinsic matrix
+        points_world = (camera_coords_hom @ extrinsic_matrix.T)[:,:3]
+        
+        return points_world
+
 
     def reset(self):
         obs = self.env.reset()
+        print(dir(self.env))
+        self.ep_meta = self.base_env.get_ep_meta()
+        task_str = self.base_env.__class__.__name__
+        task_instr = self.ep_meta['task']
+        print("="*50)
+        print(task_str)
+        print(task_instr)
+        print("="*50)
+        variation = self.ep_meta['layout_id']
+        demo_id = self.ep_meta['style_id']
+        rollout = 0 #TODO: chage for multiple interaction in the same env
+        
+        # self.guidance_wrapper.reset_seeds(self.seed)
+        self.guidance_wrapper.set_experiment(task_str, variation, demo_id, rollout)
+        self.guidance_wrapper.set_task_description(task_instr)
         self.relay_obs(obs)
         return obs
 
@@ -307,32 +407,33 @@ class RedisWrapper(EnvWrapper):
 
         meta = self.guidance_wrapper.get_obs_meta(obs)
 
-        # unnormalized depth map
-        depth_map = obs["{}_depth".format(self.main_camera_name)][::-1]
-        depth_map = CU.get_real_depth_map(sim=self.env.sim, depth_map=depth_map)
+        depth_map = obs["{}_depth".format(self.main_camera_name)]
+        try:
+            # unnormalized depth map
+            depth_map = self.get_real_depth_map(depth_map=depth_map)
+        except:
+            pass
+        
+        if len(depth_map.shape) == 4:
+            depth_map = depth_map[-1,:,:,:]
+
+        depth_map = np.transpose(depth_map, (1,2,0))
 
         pc = self._get_point_cloud(obs, depth_map)
         
-        print(obs)
         print("OBSERVATION KEYS")
         print(obs.keys())
         # rgb = obs["camera_rgb"]
         cam = "front"
-        rgb = getattr(obs, "{}_rgb".format(cam))
+        rgb = obs["{}_image".format(self.main_camera_name)]
+        if len(rgb.shape) == 4:
+            rgb = rgb[-1,:,:,:]
+        rgb = np.transpose(rgb, (1,2,0))
+        self._visualize_pc(pc, rgb, depth_map)
+
         self.guidance_wrapper.transmit(rgb,f"{cam}_rgb", meta=meta)
         self.guidance_wrapper.transmit(depth_map,f"{cam}_depth", meta=meta)
-        self.guidance_wrapper.transmit(pc,f"{cam}_point_cloud", meta=meta)
-
-        # meta["robot_state"] = list(obs.gripper_pose)
-        # meta.update(extra_meta)
-
-        obs["timesteps"] = np.array([self.timestep])
-        
-        if reset:
-            obs["actions"] = np.zeros(self.env.action_dimension)
-        else:
-            self.timestep += 1
-            obs["actions"] = action[: self.env.action_dimension]
+        self.guidance_wrapper.transmit(pc,f"{cam}_point_cloud", meta=meta)  
 
     def close(self):
         env = self.env

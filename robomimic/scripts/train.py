@@ -124,6 +124,7 @@ def train(config, device, eval_only=False):
                     render=False,
                     render_offscreen=config.experiment.render_video,
                     use_image_obs=shape_meta["use_images"],
+                    use_depth_obs=shape_meta["use_depths"],
                     seed=config.train.seed * 1000 + env_i,
                 )
                 env = EnvUtils.create_env_from_metadata(**env_kwargs)
@@ -144,7 +145,8 @@ def train(config, device, eval_only=False):
             yield env
 
     print("")
-
+    print(shape_meta_list)
+    print('shape_meta_list[0]["ac_dim"]', shape_meta_list[0]["ac_dim"])
     # setup for a new training run
     data_logger = DataLogger(
         log_dir,
@@ -427,7 +429,6 @@ def train(config, device, eval_only=False):
 
     # terminate logging
     data_logger.close()
-
 
 def main(args):
 
