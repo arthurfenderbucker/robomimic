@@ -225,7 +225,17 @@ class FrameStackWrapper(EnvWrapper):
 
 
 from motor_cortex.common.guidance_wrapper import GuidanceWrapper, GuidanceArguments
+from motor_cortex.layers.guidance import GuidanceLayer
 import matplotlib.pyplot as plt
+import matplotlib
+import torch
+from typing import List
+matplotlib.use('TkAgg')
+
+import robomimic.utils.action_utils as AcUtils
+
+import robomimic.utils.torch_utils as TorchUtils
+# from robomimic.utils.action_utils import vector_to_action_dict
 
 class RedisWrapper(EnvWrapper):
     """
@@ -238,21 +248,67 @@ class RedisWrapper(EnvWrapper):
             env (EnvBase instance): The environment to wrap.
             wait_ak (bool): whether to wait for acknoledgement from the server before acting
         """
-        
         super(RedisWrapper, self).__init__(env=env)
 
         print("======================= initializing redis wrapper =======================")
         self.wait_ak = wait_ak
-        guidance_args = GuidanceArguments().parse_args(known_only=True)
-        self.guidance_wrapper = GuidanceWrapper(guidance_args)
-        self.rollouts_per_demo = self.guidance_wrapper.rollouts_per_demo
+        self.guidance_args = GuidanceArguments().parse_args(known_only=True)
+        self.guidance_wrapper = GuidanceWrapper(self.guidance_args)
 
+        self.rollouts_per_demo = self.guidance_wrapper.rollouts_per_demo
+        
         self.main_camera_name = "robot0_agentview_right"
         self.main_camera_index = 0
         # if self.guidance_wrapper.pub_interval > 0:
             # self.action_mode.arm_action_mode.set_callable_each_step(
             #     self.guidance_wrapper.get_obs_relay_func(self.get_obs_action))
 
+    # TODO move this function to a separete file
+    def input_to_state(self, model_output: List[torch.Tensor]):
+        # reshape the trajectories to get the last state of each trajectory
+        n = self.guidance_layer.num_samples
+        print("n: ", n)
+        # guide only for the last position of the trajectory
+        trajectories = model_output[0]
+
+        end_states =  trajectories[:,:, -1, :]
+        end_states = end_states.permute(1, 0, 2)
+
+        return end_states, None
+    def score_to_output(self, model_output: List[torch.Tensor], guidance_score: torch.Tensor, indices):
+        # states_std = self.gudance_layer.states_std
+        trajectories = model_output[0]
+        end_states_probs = model_output[1]
+        print("Trajectories size: ", trajectories.size())
+        print("end_states_probs size: ", end_states_probs.size())
+
+        samples, bs, n_wp, features = trajectories.size()
+        # end_states =  trajectories[:, -1, :].unsqueeze(1)
+        # end_states = end_states.view(-1, self.guidance_layer.num_samples, end_states.shape[-1])
+
+        guidance_mask = guidance_score.to(end_states_probs.device).permute(1,0).unsqueeze(-1)
+        print("guidance_mask size: ", guidance_mask.size())
+        # model_output_ = model_output.copy()
+
+        combined_distribution = end_states_probs * (1.0-self.guidance_factor) + guidance_mask*self.guidance_factor
+
+        if self.guidance_layer.stochastic:
+            print("Applying stochastic")
+            combined_distribution = self.guidance_layer.apply_stochastic(combined_distribution, 10)
+
+        print("combined_distribution size: ", combined_distribution.size())
+        # select the best trajectory based on the combined_distribution
+        best_traj_idx = torch.argmax(combined_distribution, dim=0)
+        print("Best trajectory index: ", best_traj_idx)
+        
+        bs_indices = torch.arange(bs).unsqueeze(1).expand(bs, n_wp)
+        n_indices = torch.arange(n_wp).unsqueeze(0).expand(bs, n_wp)
+
+        best_traj = trajectories[best_traj_idx, bs_indices, n_indices]
+        print("Best trajectory size: ", best_traj.size())
+
+        return [best_traj, combined_distribution]
+    
     def _visualize_pc(self, pc, rgb_image, depth_map):
         """
         Helper function to visualize the point cloud with colors.
@@ -288,6 +344,7 @@ class RedisWrapper(EnvWrapper):
             self.depth_image_plot = self.ax_depth.imshow(depth_map, cmap='gray')
             self.ax_depth.set_title('Depth Image')
             self.ax_depth.axis('off')
+            self.ax.set_box_aspect([1, 1, 1])  # Set the aspect ratio to be equal
 
             plt.ion()
             plt.show()
@@ -323,15 +380,14 @@ class RedisWrapper(EnvWrapper):
             plt.draw()
             plt.pause(0.001)
 
-
-
-    def _get_point_cloud(self, obs, depth_map):
+    def _get_point_cloud(self, obs, depth_map, ):
         """
         Helper function to compute the point cloud from the observation.
         """
-        height=self.base_env.camera_heights[self.main_camera_index]
-        width=self.base_env.camera_widths[self.main_camera_index]
-        
+        # height=self.base_env.camera_heights[self.main_camera_index]
+        # width=self.base_env.camera_widths[self.main_camera_index]
+        # get width and height from the depth map
+        height, width = depth_map.shape[:2]
         
         # get camera matrices
         intrinsic_matrix = self.get_camera_intrinsic_matrix(
@@ -370,66 +426,169 @@ class RedisWrapper(EnvWrapper):
         
         return points_world
 
-
     def reset(self):
         obs = self.env.reset()
         print(dir(self.env))
         self.ep_meta = self.base_env.get_ep_meta()
         task_str = self.base_env.__class__.__name__
-        task_instr = self.ep_meta['task']
+        task_instr = self.ep_meta.get("lang","")
         print("="*50)
         print(task_str)
         print(task_instr)
         print("="*50)
-        variation = self.ep_meta['layout_id']
-        demo_id = self.ep_meta['style_id']
+        variation = self.ep_meta.get('layout_id',0)
+        demo_id = self.ep_meta.get('style_id',0)
         rollout = 0 #TODO: chage for multiple interaction in the same env
         
         # self.guidance_wrapper.reset_seeds(self.seed)
+        self.guidance_wrapper.reset_params()
         self.guidance_wrapper.set_experiment(task_str, variation, demo_id, rollout)
         self.guidance_wrapper.set_task_description(task_instr)
-        self.relay_obs(obs)
+
+        self.guidance_factor=self.guidance_wrapper.guidance_factor
+
+        # self.guidance_wrapper.trigger_code_generation()
+        self.step_id = 0
+
+        guidance_func_file = "/home/arthur/Desktop/CMU/research/motorcortex/motor_cortex/logs/guidance_code_example.py"
+        self._relay_obs(obs)
+        # guidance_func_file, error = self.guidance_wrapper.retreive_guidance_code()
+        
+        # reset the guidance layer
+        if hasattr(self, 'guidance_layer'):
+            del self.guidance_layer
+        self.guidance_layer = GuidanceLayer(
+            guidance_func_file=guidance_func_file,
+            input_to_state=self.input_to_state,
+            score_to_output=self.score_to_output,
+            stochastic=self.guidance_args.stochastic
+        )
+
         return obs
 
     def reset_to(self, state):
         obs = self.env.reset_to(state)
-        self.relay_obs(obs)
+        self._relay_obs(obs)
         return obs
 
     def step(self, action):
+        """ wrapper function modify an action with guidance and relay the observation to the redis server """
+
+        # update step count
+        self.guidance_wrapper.set_step_id(self.step_id)
+        self.step_id += 1
+
+        # self.base_env.robots[0]
+        # action_guidance = AcUtils.vector_to_action_dict(action,[3,3,1],["pos", "rot", "gripper"])
+        rot_6d = action[3:9]
+        rot = TorchUtils.rot_6d_to_euler_angles(rot_6d=rot_6d, convention="XYZ").squeeze().numpy()
+
+        # sample possible other actions arround the action
+        # TODO: add dims and sigmas to conifg file or arguments
+        print(action.shape)
+        sampled_actions, sampled_actions_probs = self.guidance_layer.sample_around_outputs(torch.tensor(action[None,None,None,...]), dims=[0,1,2,-1], sigma=[0.5, 0.5, 0.5, 0.1])
+        print(sampled_actions.shape)
+
+        # apply guidance
+        guidance_output = self.guidance_layer.guide([sampled_actions, sampled_actions_probs])
+        guided_action = guidance_output[0]
+
+        # update the interenal state with new action
+        _ = self.guidance_layer.guide([guided_action[None,...], torch.ones(*guided_action.shape[:-1]+(1,))], update_previous_vars=True)
+
+        guided_action = guided_action.squeeze(0).squeeze(0).detach().numpy()
         
-        obs_ret, r, done, info = self.env.step(action)
-        self.relay_obs(obs_ret)
+        # take a step in the environment
+        obs_ret, r, done, info = self.env.step(guided_action)
+        self._relay_obs(obs_ret)
+
         return obs_ret, r, done, info
 
-    def relay_obs(self, obs, action=None, reset=False):
+    def get_objects_in_scene(self):
+        """Retrieves the ground truth poses and orientations of the objects in the scene."""
+        objs = {}
+        for fixture_name, fixture in self.base_env.fixtures.items():
+            name = getattr(fixture, "nat_lang",getattr(fixture, "name", fixture_name))
+            pos = getattr(fixture, "pos", None)
+            quat = getattr(fixture, "quat", None)
+            size = getattr(fixture, "size", None)
+            euler = getattr(fixture, "euler", None)
+            origin_offset = getattr(fixture, "origin_offset", None)
+
+            objs[name] = {
+                "pos": pos,
+                "size": size,
+                "quat": quat,
+                "euler": euler,
+                "origin_offset": origin_offset,
+                "fixture": fixture_name,
+            }
+            # print(name, objs[name])
+        return objs
+    
+    def _render_high_res_image_and_depth(self):
+        """Renders a high resolution image of the scene."""
+        # TODO: make the resolution a parameter
+        rgb, depth = self.base_env.sim.render(camera_name=self.main_camera_name, width=512, height=512, depth=True)
+        
+        return rgb, depth
+        # 
+    def _relay_obs(self, obs, action=None, reset=False):
         """overwriting the update_obs method to relay the observations to the redis server"""
+
+        high_res_rgb, high_res_depth = self._render_high_res_image_and_depth()
 
         meta = self.guidance_wrapper.get_obs_meta(obs)
 
-        depth_map = obs["{}_depth".format(self.main_camera_name)]
+        # depth_map = obs["{}_depth".format(self.main_camera_name)]
+        
+        
+        # if len(depth_map.shape) == 4:
+        #     depth_map = depth_map[-1,:,:,:]
+
+        # depth_map = np.transpose(depth_map, (1,2,0))
+        # pc = self._get_point_cloud(obs, depth_map)
+
+        print("OBSERVATION KEYS")
+        print(obs.keys())
+        objs=self.get_objects_in_scene()
+        # rgb = obs["camera_rgb"]
+        # rgb = obs["{}_image".format(self.main_camera_name)]
+        # if len(rgb.shape) == 4:
+        #     rgb = rgb[-1,:,:,:]
+        # rgb = np.transpose(rgb, (1,2,0))
+        # self._visualize_pc(pc, rgb, depth_map)
+
+        gripper_pose = obs["robot0_eef_pos"][-1]
+        gripper_quat = obs["robot0_eef_quat"][-1]
+        gripper =  obs["robot0_gripper_qpos"][-1]
+        robot_state = np.concatenate([gripper_pose, gripper_quat, gripper])
+        meta["robot_state"] = robot_state
+        meta["objs"] = objs
+
+        # prepare data for transmission
+        # pc = pc.reshape(rgb.shape[0], rgb.shape[1], 3)
+        # rgb = (rgb*255).astype(np.uint8)
+        # depth_map = depth_map.astype(np.uint8)
+
+
+        # HIGH res
+        rgb = high_res_rgb[::-1,::-1,::-1]
+        depth_map = high_res_depth[::-1,::-1]
         try:
             # unnormalized depth map
             depth_map = self.get_real_depth_map(depth_map=depth_map)
-        except:
+        except Exception as e:
+            print(e)
             pass
-        
-        if len(depth_map.shape) == 4:
-            depth_map = depth_map[-1,:,:,:]
-
-        depth_map = np.transpose(depth_map, (1,2,0))
-
         pc = self._get_point_cloud(obs, depth_map)
-        
-        print("OBSERVATION KEYS")
-        print(obs.keys())
-        # rgb = obs["camera_rgb"]
+        # self._visualize_pc(pc, rgb/255, depth_map)
+
+
+        pc = pc.reshape(rgb.shape[0], rgb.shape[1], 3)
+        rgb= rgb.astype(np.uint8)
+        depth_map = depth_map.astype(np.uint8)
         cam = "front"
-        rgb = obs["{}_image".format(self.main_camera_name)]
-        if len(rgb.shape) == 4:
-            rgb = rgb[-1,:,:,:]
-        rgb = np.transpose(rgb, (1,2,0))
-        self._visualize_pc(pc, rgb, depth_map)
 
         self.guidance_wrapper.transmit(rgb,f"{cam}_rgb", meta=meta)
         self.guidance_wrapper.transmit(depth_map,f"{cam}_depth", meta=meta)

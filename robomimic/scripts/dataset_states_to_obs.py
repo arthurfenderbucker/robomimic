@@ -317,6 +317,9 @@ def write_traj_to_file(args, output_path, total_samples, total_run, processes, i
         env_meta["env_kwargs"]["generative_textures"] = "100p"
     if args.randomize_cameras:
         env_meta["env_kwargs"]["randomize_cameras"] = True
+    if args.segmentations:
+        print(args.segmentations)
+        env_meta["env_kwargs"]["segmentations"] = args.segmentations
     # if args.depth:
     #     print("\n\n\ncamera depths: {}\n\n\n".format(args.camera_depths))
     #     if args.camera_depths in ["1", "True", "true"]:
@@ -638,6 +641,15 @@ if __name__ == "__main__":
         "--depth", 
         action='store_true',
         help="(optional) use depth observations for each camera",
+    )
+
+    # flag for segmentations
+    parser.add_argument(
+        "--segmentations",
+        type=str,
+        nargs='+',
+        default=None,
+        help="(optional) use segmentation observations for each camera. Options are {instance, class, element}",
     )
 
     # specifies how the "done" signal is written. If "0", then the "done" signal is 1 wherever 
