@@ -1,7 +1,6 @@
 """
 This file contains some PyTorch utilities.
 """
-import numpy as np
 import torch
 import torch.optim as optim
 import torch.nn.functional as F
@@ -140,8 +139,7 @@ def lr_scheduler_from_optim_params(net_optim_params, net, optimizer, num_trainin
     lr_scheduler_type = net_optim_params["learning_rate"]["scheduler_type"]
 
     from diffusers.optimization import (
-        Union, SchedulerType, Optional,
-        Optimizer, TYPE_TO_SCHEDULER_FUNCTION
+        SchedulerType, TYPE_TO_SCHEDULER_FUNCTION
     )
 
     num_warmup_steps = net_optim_params["learning_rate"].get("num_warmup_steps", 10000)

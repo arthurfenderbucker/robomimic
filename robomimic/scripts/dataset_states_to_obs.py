@@ -33,6 +33,16 @@ Example usage:
     python dataset_states_to_obs.py --dataset /path/to/demo.hdf5 --output_name image.hdf5 \
         --done_mode 2 --camera_names agentview robot0_eye_in_hand --camera_height 84 --camera_width 84
 
+    # extract 84x84 image and depth observations
+    python dataset_states_to_obs.py --dataset /path/to/demo.hdf5 --output_name depth.hdf5 \
+        --done_mode 2 --camera_names agentview robot0_eye_in_hand --camera_height 84 --camera_width 84 --depth
+
+    # (space saving option) extract 84x84 image observations with compression and without 
+    # extracting next obs (not needed for pure imitation learning algos)
+    python dataset_states_to_obs.py --dataset /path/to/demo.hdf5 --output_name image.hdf5 \
+        --done_mode 2 --camera_names agentview robot0_eye_in_hand --camera_height 84 --camera_width 84 \
+        --compress --exclude-next-obs
+
     # use dense rewards, and only annotate the end of trajectories with done signal
     python dataset_states_to_obs.py --dataset /path/to/demo.hdf5 --output_name image_dense_done_1.hdf5 \
         --done_mode 1 --dense --camera_names agentview robot0_eye_in_hand --camera_height 84 --camera_width 84
@@ -56,8 +66,18 @@ from robomimic.envs.env_base import EnvBase
 from robomimic.scripts.conversion.extract_action_dict import extract_action_dict
 from robomimic.scripts.filter_dataset_size import filter_dataset_size
 
+class NumpyEncoder(json.JSONEncoder):
+    """ Special json encoder for numpy types """
+    def default(self, obj):
+        if isinstance(obj, np.integer):
+            return int(obj)
+        elif isinstance(obj, np.floating):
+            return float(obj)
+        elif isinstance(obj, np.ndarray):
+            return obj.tolist()
+        return json.JSONEncoder.default(self, obj)
+    
 """ End of dataset_states_to_args copy over """
-
 def extract_trajectory(
     env, 
     initial_state, 
@@ -65,6 +85,9 @@ def extract_trajectory(
     actions,
     done_mode,
     add_datagen_info=False,
+    camera_names=None, 
+    camera_height=84, 
+    camera_width=84,
 ):
     """
     Helper function to extract observations, rewards, and dones along a trajectory using
@@ -90,6 +113,16 @@ def extract_trajectory(
     # hack: add the cam configs in, since it's been modified
     ep_meta["cam_configs"] = deepcopy(env.env._cam_configs)
     initial_state["ep_meta"] = json.dumps(ep_meta, indent=4)
+    # maybe add in intrinsics and extrinsics for all cameras
+    camera_info = None
+    is_robosuite_env = EnvUtils.is_robosuite_env(env=env)
+    if is_robosuite_env:
+        camera_info = get_camera_info(
+            env=env,
+            camera_names=camera_names, 
+            camera_height=camera_height, 
+            camera_width=camera_width,
+        )
 
     traj = dict(
         obs=[], 
@@ -141,7 +174,7 @@ def extract_trajectory(
     # convert list of dict to dict of list for obs dictionaries (for convenient writes to hdf5 dataset)
     traj["obs"] = TensorUtils.list_of_flat_dict_to_dict_of_list(traj["obs"])
     traj["datagen_info"] = TensorUtils.list_of_flat_dict_to_dict_of_list(traj["datagen_info"])
-    
+    traj['camera_info'] = camera_info
     # list to numpy array
     for k in traj:
         if k == "initial_state_dict":
@@ -153,6 +186,54 @@ def extract_trajectory(
             traj[k] = np.array(traj[k])
 
     return traj
+
+
+def get_camera_info(
+    env,
+    camera_names=None, 
+    camera_height=84, 
+    camera_width=84,
+):
+    """
+    Helper function to get camera intrinsics and extrinsics for cameras being used for observations.
+    """
+
+    # TODO: make this function more general than just robosuite environments
+    assert EnvUtils.is_robosuite_env(env=env)
+
+    if camera_names is None:
+        return None
+
+    camera_info = dict()
+    for cam_name in camera_names:
+        K = env.get_camera_intrinsic_matrix(camera_name=cam_name, camera_height=camera_height, camera_width=camera_width)
+        R = env.get_camera_extrinsic_matrix(camera_name=cam_name) # camera pose in world frame
+        world_to_camera = env.get_camera_transform_matrix(camera_name=cam_name, camera_height=camera_height, camera_width=camera_width)
+        camera_to_world = np.linalg.inv(world_to_camera)
+
+        # TODO: fix the eye in hand for the wheeled robot
+        # if "eye_in_hand" in cam_name:
+        #     # convert extrinsic matrix to be relative to robot eef control frame
+        #     assert cam_name.startswith("robot0")
+        #     eef_site_name = env.base_env.robots[0].controller.eef_name
+        #     eef_pos = np.array(env.base_env.sim.data.site_xpos[env.base_env.sim.model.site_name2id(eef_site_name)])
+        #     eef_rot = np.array(env.base_env.sim.data.site_xmat[env.base_env.sim.model.site_name2id(eef_site_name)].reshape([3, 3]))
+        #     eef_pose = np.zeros((4, 4)) # eef pose in world frame
+        #     eef_pose[:3, :3] = eef_rot
+        #     eef_pose[:3, 3] = eef_pos
+        #     eef_pose[3, 3] = 1.0
+        #     eef_pose_inv = np.zeros((4, 4))
+        #     eef_pose_inv[:3, :3] = eef_pose[:3, :3].T
+        #     eef_pose_inv[:3, 3] = -eef_pose_inv[:3, :3].dot(eef_pose[:3, 3])
+        #     eef_pose_inv[3, 3] = 1.0
+        #     R = R.dot(eef_pose_inv) # T_E^W * T_W^C = T_E^C
+        camera_info[cam_name] = dict(
+            intrinsics=K.tolist(),
+            extrinsics=R.tolist(),
+            world_to_camera=world_to_camera.tolist(),
+            camera_to_world=camera_to_world.tolist(),
+        )
+    return camera_info
 
 
 """ The process that writes over the generated files to memory """
@@ -171,6 +252,7 @@ def write_traj_to_file(args, output_path, total_samples, total_run, processes, i
                 ep = item[0]
                 traj = item[1]
                 process_num = item[2]
+                
                 try:
                     ep_data_grp = data_grp.create_group(ep)
                     ep_data_grp.create_dataset("actions", data=np.array(traj["actions"]))
@@ -207,6 +289,11 @@ def write_traj_to_file(args, output_path, total_samples, total_run, processes, i
                     #     ep_data_grp.attrs["ep_meta"] = f["data/{}".format(ep)].attrs["ep_meta"]
                     ep_data_grp.attrs["num_samples"] = traj["actions"].shape[0] # number of transitions in this episode
                     
+                    camera_info = traj.get("camera_info", None)
+                    if camera_info is not None:
+                        assert is_robosuite_env
+                        ep_data_grp.attrs["camera_info"] = json.dumps(camera_info, indent=4, cls=NumpyEncoder)
+                        
                     total_samples.value += traj["actions"].shape[0]
                 except Exception as e:
                     print("++"*50)
@@ -230,12 +317,25 @@ def write_traj_to_file(args, output_path, total_samples, total_run, processes, i
         env_meta["env_kwargs"]["generative_textures"] = "100p"
     if args.randomize_cameras:
         env_meta["env_kwargs"]["randomize_cameras"] = True
+    if args.segmentations:
+        print(args.segmentations)
+        env_meta["env_kwargs"]["segmentations"] = args.segmentations
+    # if args.depth:
+    #     print("\n\n\ncamera depths: {}\n\n\n".format(args.camera_depths))
+    #     if args.camera_depths in ["1", "True", "true"]:
+    #         env_meta["env_kwargs"]["camera_depths"] = True
+    #     elif args.camera_depths in ["0", "False", "false"]:
+    #         env_meta["env_kwargs"]["camera_depths"] = False
+    #     else:
+    #         env_meta["env_kwargs"]["camera_depths"] = args.depth
+
     env = EnvUtils.create_env_for_data_processing(
         env_meta=env_meta,
         camera_names=args.camera_names, 
         camera_height=args.camera_height, 
         camera_width=args.camera_width, 
         reward_shaping=args.shaped,
+        use_depth_obs=args.depth,
     )
     print("total processes end {}".format(total_run.value))
     data_grp.attrs["env_args"] = json.dumps(env.serialize(), indent=4) # environment info
@@ -306,6 +406,7 @@ def extract_multiple_trajectories_with_error(process_num, current_work_array, wo
         camera_height=args.camera_height, 
         camera_width=args.camera_width, 
         reward_shaping=args.shaped,
+        use_depth_obs=args.depth,
     )
 
     start_time = time.time()
@@ -351,13 +452,16 @@ def extract_multiple_trajectories_with_error(process_num, current_work_array, wo
             # extract obs, rewards, dones
             actions = f["data/{}/actions".format(ep)][()]
                 
-            traj = extract_trajectory(
+            traj= extract_trajectory(
                 env=env, 
                 initial_state=initial_state, 
                 states=states, 
                 actions=actions,
                 done_mode=args.done_mode,
                 add_datagen_info=args.add_datagen_info,
+                camera_names=args.camera_names,
+                camera_height=args.camera_height,
+                camera_width=args.camera_width,
             )
 
             # maybe copy reward or done signal from source file
@@ -396,6 +500,7 @@ def extract_multiple_trajectories_with_error(process_num, current_work_array, wo
                 camera_height=args.camera_height, 
                 camera_width=args.camera_width, 
                 reward_shaping=args.shaped,
+                use_depth_obs=args.depth,
             )
 
     f.close()
@@ -529,6 +634,22 @@ if __name__ == "__main__":
         type=int,
         default=128,
         help="(optional) width of image observations",
+    )
+
+    # flag for including depth observations per camera
+    parser.add_argument(
+        "--depth", 
+        action='store_true',
+        help="(optional) use depth observations for each camera",
+    )
+
+    # flag for segmentations
+    parser.add_argument(
+        "--segmentations",
+        type=str,
+        nargs='+',
+        default=None,
+        help="(optional) use segmentation observations for each camera. Options are {instance, class, element}",
     )
 
     # specifies how the "done" signal is written. If "0", then the "done" signal is 1 wherever 

@@ -7,7 +7,6 @@ observation keys of a certain modality and shape.
 As an example, an observation could consist of a flat "robot0_eef_pos" observation key,
 and a 3-channel RGB "agentview_image" observation key.
 """
-import sys
 import numpy as np
 import textwrap
 from copy import deepcopy
@@ -15,15 +14,12 @@ from collections import OrderedDict
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-import torch.distributions as D
 
 from robomimic.utils.python_utils import extract_class_init_kwargs_from_dict
 import robomimic.utils.tensor_utils as TensorUtils
 import robomimic.utils.obs_utils as ObsUtils
-from robomimic.models.base_nets import Module, Sequential, MLP, RNN_Base, ResNet18Conv, SpatialSoftmax, \
-    FeatureAggregator
-from robomimic.models.obs_core import VisualCore, Randomizer, VisualCoreLanguageConditioned
+from robomimic.models.base_nets import Module, Sequential, MLP, RNN_Base
+from robomimic.models.obs_core import Randomizer, VisualCoreLanguageConditioned
 from robomimic.models.transformers import PositionalEncoding, GPT_Backbone
 from robomimic.macros import LANG_EMB_KEY
 

@@ -4,12 +4,11 @@ different kinds of modalities such as images.
 """
 import numpy as np
 from copy import deepcopy
-from collections import OrderedDict
 
 import torch
-import torch.nn.functional as F
 
 import robomimic.utils.tensor_utils as TU
+import robomimic.utils.env_utils as EnvUtils
 
 # MACRO FOR VALID IMAGE CHANNEL SIZES
 VALID_IMAGE_CHANNEL_DIMS = {1, 3}       # depth, rgb
@@ -41,8 +40,9 @@ OBS_MODALITY_CLASSES = {}
 # in their config, without having to manually register their class internally.
 # This also future-proofs us for any additional encoder / randomizer classes we would
 # like to add ourselves.
-OBS_ENCODER_CORES = {"None": None}          # Include default None
-OBS_RANDOMIZERS = {"None": None}            # Include default None
+OBS_ENCODER_CORES = {"None": None}          # Per-modality core net as defined in obs_cores.py, e.g., "VisualCore"
+OBS_RANDOMIZERS = {"None": None}            # Obs randomizer defined in obs_cores.py, e.g., "CropRandomizer"
+OBS_ENCODER_BACKBONES = {"None": None}      # Architecture backbones for encoding obervation, e.g., "ResNet18Conv"
 
 
 def register_obs_key(target_class):
@@ -58,6 +58,10 @@ def register_encoder_core(target_class):
 def register_randomizer(target_class):
     assert target_class not in OBS_RANDOMIZERS, f"Already registered obs randomizer {target_class}!"
     OBS_RANDOMIZERS[target_class.__name__] = target_class
+
+def register_encoder_backbone(target_class):
+    assert target_class not in OBS_ENCODER_BACKBONES, f"Already registered obs encoder backbone {target_class}!"
+    OBS_ENCODER_BACKBONES[target_class.__name__] = target_class
 
 
 class ObservationKeyToModalityDict(dict):
@@ -372,7 +376,7 @@ def process_frame(frame, channel_dim, scale):
     Args:
         frame (np.array or torch.Tensor): frame array
         channel_dim (int): Number of channels to sanity check for
-        scale (float): Value to normalize inputs by
+        scale (float or None): Value to normalize inputs by
 
     Returns:
         processed_frame (np.array or torch.Tensor): processed frame
@@ -380,8 +384,9 @@ def process_frame(frame, channel_dim, scale):
     # Channel size should either be 3 (RGB) or 1 (depth)
     assert (frame.shape[-1] == channel_dim)
     frame = TU.to_float(frame)
-    frame /= scale
-    frame = frame.clip(0.0, 1.0)
+    if scale is not None:
+        frame = frame / scale
+        frame = frame.clip(0.0, 1.0)
     frame = batch_image_hwc_to_chw(frame)
 
     return frame
@@ -434,7 +439,7 @@ def unprocess_frame(frame, channel_dim, scale):
     Args:
         frame (np.array or torch.Tensor): frame array
         channel_dim (int): What channel dimension should be (used for sanity check)
-        scale (float): Scaling factor to apply during denormalization
+        scale (float or None): Scaling factor to apply during denormalization
 
     Returns:
         unprocessed_frame (np.array or torch.Tensor): frame passed through
@@ -442,7 +447,8 @@ def unprocess_frame(frame, channel_dim, scale):
     """
     assert frame.shape[-3] == channel_dim # check for channel dimension
     frame = batch_image_chw_to_hwc(frame)
-    frame *= scale
+    if scale is not None:
+        frame = scale * frame
     return frame
 
 
@@ -740,6 +746,54 @@ def sample_random_image_crops(images, crop_height, crop_width, num_crops, pos_en
     return crops, crop_inds
 
 
+
+def get_camera_info(
+    env,
+    camera_names=None, 
+    camera_height=84, 
+    camera_width=84,
+):
+    """
+    Helper function to get camera intrinsics and extrinsics for cameras being used for observations.
+    """
+
+    # TODO: make this function more general than just robosuite environments
+    assert EnvUtils.is_robosuite_env(env=env)
+
+    if camera_names is None:
+        return None
+
+    camera_info = dict()
+    for cam_name in camera_names:
+        K = env.get_camera_intrinsic_matrix(camera_name=cam_name, camera_height=camera_height, camera_width=camera_width)
+        R = env.get_camera_extrinsic_matrix(camera_name=cam_name) # camera pose in world frame
+        world_to_camera = env.get_camera_transform_matrix(camera_name=cam_name, camera_height=camera_height, camera_width=camera_width)
+        camera_to_world = np.linalg.inv(world_to_camera)
+
+        # TODO: fix the eye in hand for the wheeled robot
+        # if "eye_in_hand" in cam_name:
+        #     # convert extrinsic matrix to be relative to robot eef control frame
+        #     assert cam_name.startswith("robot0")
+        #     eef_site_name = env.base_env.robots[0].controller.eef_name
+        #     eef_pos = np.array(env.base_env.sim.data.site_xpos[env.base_env.sim.model.site_name2id(eef_site_name)])
+        #     eef_rot = np.array(env.base_env.sim.data.site_xmat[env.base_env.sim.model.site_name2id(eef_site_name)].reshape([3, 3]))
+        #     eef_pose = np.zeros((4, 4)) # eef pose in world frame
+        #     eef_pose[:3, :3] = eef_rot
+        #     eef_pose[:3, 3] = eef_pos
+        #     eef_pose[3, 3] = 1.0
+        #     eef_pose_inv = np.zeros((4, 4))
+        #     eef_pose_inv[:3, :3] = eef_pose[:3, :3].T
+        #     eef_pose_inv[:3, 3] = -eef_pose_inv[:3, :3].dot(eef_pose[:3, 3])
+        #     eef_pose_inv[3, 3] = 1.0
+        #     R = R.dot(eef_pose_inv) # T_E^W * T_W^C = T_E^C
+        camera_info[cam_name] = dict(
+            intrinsics=K.tolist(),
+            extrinsics=R.tolist(),
+            world_to_camera=world_to_camera.tolist(),
+            camera_to_world=camera_to_world.tolist(),
+        )
+    return camera_info
+
 class Modality:
     """
     Observation Modality class to encapsulate necessary functions needed to
@@ -980,10 +1034,34 @@ class ScanModality(Modality):
 
     @classmethod
     def _default_obs_processor(cls, obs):
+        # Channel swaps ([...,] L, C) --> ([...,] C, L)
+        
+        # First, add extra dimension at 2nd to last index to treat this as a frame
+        shape = obs.shape
+        new_shape = [*shape[:-2], 1, *shape[-2:]]
+        obs = obs.reshape(new_shape)
+        
+        # Convert shape
+        obs = batch_image_hwc_to_chw(obs)
+        
+        # Remove extra dimension (it's the second from last dimension)
+        obs = obs.squeeze(-2)
         return obs
 
     @classmethod
     def _default_obs_unprocessor(cls, obs):
+        # Channel swaps ([B,] C, L) --> ([B,] L, C)
+        
+        # First, add extra dimension at 1st index to treat this as a frame
+        shape = obs.shape
+        new_shape = [*shape[:-2], 1, *shape[-2:]]
+        obs = obs.reshape(new_shape)
+
+        # Convert shape
+        obs = batch_image_chw_to_hwc(obs)
+
+        # Remove extra dimension (it's the second from last dimension)
+        obs = obs.squeeze(-2)
         return obs
 
 
