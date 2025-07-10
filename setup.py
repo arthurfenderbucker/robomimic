@@ -16,7 +16,7 @@ setup(
         package for package in find_packages() if package.startswith("robomimic")
     ],
     install_requires=[
-        "numpy==1.23.2",
+        "numpy",
         "h5py",
         "psutil",
         "tqdm",
