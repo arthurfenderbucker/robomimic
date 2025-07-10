@@ -66,7 +66,7 @@ from robomimic.envs.env_base import EnvBase
 from robomimic.scripts.conversion.extract_action_dict import extract_action_dict
 from robomimic.scripts.filter_dataset_size import filter_dataset_size
 
-class NumpyEncoder(json.JSONEncoder):
+class CustomJsonEncoder(json.JSONEncoder):
     """ Special json encoder for numpy types """
     def default(self, obj):
         if isinstance(obj, np.integer):
@@ -88,6 +88,7 @@ def extract_trajectory(
     camera_names=None, 
     camera_height=84, 
     camera_width=84,
+    segment=True,
 ):
     """
     Helper function to extract observations, rewards, and dones along a trajectory using
@@ -124,6 +125,8 @@ def extract_trajectory(
             camera_width=camera_width,
         )
 
+    ids2labels = env.base_env.sim.model._geom_id2name
+        
     traj = dict(
         obs=[], 
         next_obs=[], 
@@ -134,17 +137,50 @@ def extract_trajectory(
         states=np.array(states), 
         initial_state_dict=initial_state,
         datagen_info=[],
-    )    
+        ids2labels=ids2labels
+    )
     traj_len = states.shape[0]
     # iteration variable @t is over "next obs" indices
     for t in range(traj_len):
         obs = deepcopy(env.reset_to({"states" : states[t]}))
-
+        
+    
         # extract datagen info
         if add_datagen_info:
             datagen_info = env.base_env.get_datagen_info(action=actions[t])
         else:
             datagen_info = {}
+
+        # extract segmentation observations if applicable
+        if segment:
+            for cam_name in camera_names:
+                segmentation = env.base_env.sim.render(camera_name=cam_name, width=camera_width, height=camera_height, segmentation=True)
+                types = segmentation[::-1, ::, 0]
+                ids = segmentation[::-1, ::, 1]
+
+                invalid_types = env.base_env.sim.model.sensor_objtype # ndarray of invalid types
+                for t in invalid_types:
+                    ids[types == t] = -1
+                obs.update({
+                    f"{cam_name}_segmentation": ids})
+
+        # get the camera info for each frame
+        frame_camera_info = get_camera_info(
+            env=env,
+            camera_names=camera_names,
+            camera_height=camera_height,
+            camera_width=camera_width,
+        )
+        for cam_name in camera_names:
+            obs.update({f"{cam_name}_extrinsics": frame_camera_info[cam_name]["extrinsics"],
+                        f"{cam_name}_intrinsics": frame_camera_info[cam_name]["intrinsics"],
+                        f"{cam_name}_world_to_camera": frame_camera_info[cam_name]["world_to_camera"],
+                        f"{cam_name}_camera_to_world": frame_camera_info[cam_name]["camera_to_world"]})
+
+        # except Exception as e:
+        #     print("\n\n")
+        #     print("\033[91mError extracting segmentation observations: {}\033[0m".format(e))
+        #     print("\n\n")
 
         # infer reward signal
         # note: our tasks use reward r(s'), reward AFTER transition, so this is
@@ -174,6 +210,7 @@ def extract_trajectory(
     # convert list of dict to dict of list for obs dictionaries (for convenient writes to hdf5 dataset)
     traj["obs"] = TensorUtils.list_of_flat_dict_to_dict_of_list(traj["obs"])
     traj["datagen_info"] = TensorUtils.list_of_flat_dict_to_dict_of_list(traj["datagen_info"])
+
     traj['camera_info'] = camera_info
     # list to numpy array
     for k in traj:
@@ -260,6 +297,8 @@ def write_traj_to_file(args, output_path, total_samples, total_run, processes, i
                     ep_data_grp.create_dataset("rewards", data=np.array(traj["rewards"]))
                     ep_data_grp.create_dataset("dones", data=np.array(traj["dones"]))
                     ep_data_grp.create_dataset("actions_abs", data=np.array(traj["actions_abs"]))
+                    ep_data_grp.create_dataset("ids2labels", data=json.dumps(traj["ids2labels"], indent=4, cls=CustomJsonEncoder))
+
                     for k in traj["obs"]:
                         if args.no_compress:
                             ep_data_grp.create_dataset("obs/{}".format(k), data=np.array(traj["obs"][k]))
@@ -292,7 +331,7 @@ def write_traj_to_file(args, output_path, total_samples, total_run, processes, i
                     camera_info = traj.get("camera_info", None)
                     if camera_info is not None:
                         assert is_robosuite_env
-                        ep_data_grp.attrs["camera_info"] = json.dumps(camera_info, indent=4, cls=NumpyEncoder)
+                        ep_data_grp.attrs["camera_info"] = json.dumps(camera_info, indent=4, cls=CustomJsonEncoder)
                         
                     total_samples.value += traj["actions"].shape[0]
                 except Exception as e:
@@ -317,9 +356,9 @@ def write_traj_to_file(args, output_path, total_samples, total_run, processes, i
         env_meta["env_kwargs"]["generative_textures"] = "100p"
     if args.randomize_cameras:
         env_meta["env_kwargs"]["randomize_cameras"] = True
-    if args.segmentations:
-        print(args.segmentations)
-        env_meta["env_kwargs"]["segmentations"] = args.segmentations
+    # if args.segmentations:
+    #     print(args.segmentations)
+    #     env_meta["env_kwargs"]["segmentations"] = args.segmentations
     # if args.depth:
     #     print("\n\n\ncamera depths: {}\n\n\n".format(args.camera_depths))
     #     if args.camera_depths in ["1", "True", "true"]:
@@ -462,6 +501,7 @@ def extract_multiple_trajectories_with_error(process_num, current_work_array, wo
                 camera_names=args.camera_names,
                 camera_height=args.camera_height,
                 camera_width=args.camera_width,
+                segment=args.segment
             )
 
             # maybe copy reward or done signal from source file
@@ -645,11 +685,9 @@ if __name__ == "__main__":
 
     # flag for segmentations
     parser.add_argument(
-        "--segmentations",
-        type=str,
-        nargs='+',
-        default=None,
-        help="(optional) use segmentation observations for each camera. Options are {instance, class, element}",
+        "--segment",
+        action='store_true',
+        help="(optional) use segmentation observations for each camera",
     )
 
     # specifies how the "done" signal is written. If "0", then the "done" signal is 1 wherever 
