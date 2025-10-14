@@ -8,6 +8,58 @@ import robomimic.envs.env_base as EB
 from robomimic.utils.log_utils import log_warning
 
 
+import numpy as np
+def get_camera_info(
+    env,
+    camera_names : list[str] =None, 
+    camera_height: int | list[int] = 84, 
+    camera_width: int | list[int] = 84,
+):
+    """
+    Helper function to get camera intrinsics and extrinsics for cameras being used for observations.
+    """
+
+    # TODO: make this function more general than just robosuite environments
+    assert is_robosuite_env(env=env)
+
+    if camera_names is None:
+        return None
+
+    camera_info = dict()
+    for i, cam_name in enumerate(camera_names):
+        c_h = camera_height[i] if isinstance(camera_height, (list, tuple)) else camera_height
+        c_w = camera_width[i] if isinstance(camera_width, (list, tuple)) else camera_width
+
+        K = env.get_camera_intrinsic_matrix(camera_name=cam_name, camera_height=c_h, camera_width=c_w)
+        R = env.get_camera_extrinsic_matrix(camera_name=cam_name) # camera pose in world frame
+        world_to_camera = env.get_camera_transform_matrix(camera_name=cam_name, camera_height=c_h, camera_width=c_w)
+        camera_to_world = np.linalg.inv(world_to_camera)
+
+        # TODO: fix the eye in hand for the wheeled robot
+        # if "eye_in_hand" in cam_name:
+        #     # convert extrinsic matrix to be relative to robot eef control frame
+        #     assert cam_name.startswith("robot0")
+        #     eef_site_name = env.base_env.robots[0].controller.eef_name
+        #     eef_pos = np.array(env.base_env.sim.data.site_xpos[env.base_env.sim.model.site_name2id(eef_site_name)])
+        #     eef_rot = np.array(env.base_env.sim.data.site_xmat[env.base_env.sim.model.site_name2id(eef_site_name)].reshape([3, 3]))
+        #     eef_pose = np.zeros((4, 4)) # eef pose in world frame
+        #     eef_pose[:3, :3] = eef_rot
+        #     eef_pose[:3, 3] = eef_pos
+        #     eef_pose[3, 3] = 1.0
+        #     eef_pose_inv = np.zeros((4, 4))
+        #     eef_pose_inv[:3, :3] = eef_pose[:3, :3].T
+        #     eef_pose_inv[:3, 3] = -eef_pose_inv[:3, :3].dot(eef_pose[:3, 3])
+        #     eef_pose_inv[3, 3] = 1.0
+        #     R = R.dot(eef_pose_inv) # T_E^W * T_W^C = T_E^C
+        camera_info[cam_name] = dict(
+            intrinsics=K.tolist(),
+            extrinsics=R.tolist(),
+            world_to_camera=world_to_camera.tolist(),
+            camera_to_world=camera_to_world.tolist(),
+        )
+    return camera_info
+
+
 def get_env_class(env_meta=None, env_type=None, env=None):
     """
     Return env class from either env_meta, env_type, or env.

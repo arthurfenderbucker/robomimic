@@ -113,12 +113,13 @@ def extract_trajectory(
     ep_meta = json.loads(initial_state["ep_meta"])
     # hack: add the cam configs in, since it's been modified
     ep_meta["cam_configs"] = deepcopy(env.env._cam_configs)
+    ep_meta["gen_textures"] = deepcopy(env.env.get_ep_meta().get("gen_textures", {}))
     initial_state["ep_meta"] = json.dumps(ep_meta, indent=4)
     # maybe add in intrinsics and extrinsics for all cameras
     camera_info = None
     is_robosuite_env = EnvUtils.is_robosuite_env(env=env)
     if is_robosuite_env:
-        camera_info = get_camera_info(
+        camera_info = EnvUtils.get_camera_info(
             env=env,
             camera_names=camera_names, 
             camera_height=camera_height, 
@@ -165,7 +166,7 @@ def extract_trajectory(
                     f"{cam_name}_segmentation": ids})
 
         # get the camera info for each frame
-        frame_camera_info = get_camera_info(
+        frame_camera_info = EnvUtils.get_camera_info(
             env=env,
             camera_names=camera_names,
             camera_height=camera_height,
@@ -224,53 +225,6 @@ def extract_trajectory(
 
     return traj
 
-
-def get_camera_info(
-    env,
-    camera_names=None, 
-    camera_height=84, 
-    camera_width=84,
-):
-    """
-    Helper function to get camera intrinsics and extrinsics for cameras being used for observations.
-    """
-
-    # TODO: make this function more general than just robosuite environments
-    assert EnvUtils.is_robosuite_env(env=env)
-
-    if camera_names is None:
-        return None
-
-    camera_info = dict()
-    for cam_name in camera_names:
-        K = env.get_camera_intrinsic_matrix(camera_name=cam_name, camera_height=camera_height, camera_width=camera_width)
-        R = env.get_camera_extrinsic_matrix(camera_name=cam_name) # camera pose in world frame
-        world_to_camera = env.get_camera_transform_matrix(camera_name=cam_name, camera_height=camera_height, camera_width=camera_width)
-        camera_to_world = np.linalg.inv(world_to_camera)
-
-        # TODO: fix the eye in hand for the wheeled robot
-        # if "eye_in_hand" in cam_name:
-        #     # convert extrinsic matrix to be relative to robot eef control frame
-        #     assert cam_name.startswith("robot0")
-        #     eef_site_name = env.base_env.robots[0].controller.eef_name
-        #     eef_pos = np.array(env.base_env.sim.data.site_xpos[env.base_env.sim.model.site_name2id(eef_site_name)])
-        #     eef_rot = np.array(env.base_env.sim.data.site_xmat[env.base_env.sim.model.site_name2id(eef_site_name)].reshape([3, 3]))
-        #     eef_pose = np.zeros((4, 4)) # eef pose in world frame
-        #     eef_pose[:3, :3] = eef_rot
-        #     eef_pose[:3, 3] = eef_pos
-        #     eef_pose[3, 3] = 1.0
-        #     eef_pose_inv = np.zeros((4, 4))
-        #     eef_pose_inv[:3, :3] = eef_pose[:3, :3].T
-        #     eef_pose_inv[:3, 3] = -eef_pose_inv[:3, :3].dot(eef_pose[:3, 3])
-        #     eef_pose_inv[3, 3] = 1.0
-        #     R = R.dot(eef_pose_inv) # T_E^W * T_W^C = T_E^C
-        camera_info[cam_name] = dict(
-            intrinsics=K.tolist(),
-            extrinsics=R.tolist(),
-            world_to_camera=world_to_camera.tolist(),
-            camera_to_world=camera_to_world.tolist(),
-        )
-    return camera_info
 
 
 """ The process that writes over the generated files to memory """
@@ -375,6 +329,7 @@ def write_traj_to_file(args, output_path, total_samples, total_run, processes, i
         camera_width=args.camera_width, 
         reward_shaping=args.shaped,
         use_depth_obs=args.depth,
+        seed=args.seed
     )
     print("total processes end {}".format(total_run.value))
     data_grp.attrs["env_args"] = json.dumps(env.serialize(), indent=4) # environment info
@@ -446,6 +401,7 @@ def extract_multiple_trajectories_with_error(process_num, current_work_array, wo
         camera_width=args.camera_width, 
         reward_shaping=args.shaped,
         use_depth_obs=args.depth,
+        seed=args.seed
     )
 
     start_time = time.time()
@@ -541,6 +497,7 @@ def extract_multiple_trajectories_with_error(process_num, current_work_array, wo
                 camera_width=args.camera_width, 
                 reward_shaping=args.shaped,
                 use_depth_obs=args.depth,
+                seed=args.seed
             )
 
     f.close()
@@ -645,6 +602,14 @@ if __name__ == "__main__":
         default=None,
         help="(optional) stop after n trajectories are processed",
     )
+
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=0,
+        help="(optional) random seed for reproducibility",
+    )
+
 
     # flag for reward shaping
     parser.add_argument(
